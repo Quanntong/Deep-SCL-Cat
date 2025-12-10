@@ -8,3 +8,5 @@ seaborn
 streamlit
 pillow
 openpyxl
+xgboost
+lightgbm

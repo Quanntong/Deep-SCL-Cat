@@ -183,7 +183,7 @@ def render_sidebar():
         
         # 页面选择
         st.markdown("### 🗂️ 页面选择")
-        page_options = ["模型概览", "🎓 单体预测模拟", "📂 批量智能筛查"]
+        page_options = ["模型概览", "🎓 单体预测模拟", "📂 批量智能筛查", "⚔️ 模型竞技场"]
         selected_page = st.selectbox(
             "选择要查看的页面",
             page_options,
@@ -651,6 +651,197 @@ def render_prediction_simulator():
             st.session_state.prediction_result = None
             st.rerun()
 
+def render_model_arena():
+    """渲染模型竞技场页面"""
+    # 页面标题
+    st.markdown("<div class='main-header'>🏆 多模型性能横向测评</div>", 
+               unsafe_allow_html=True)
+    
+    st.markdown("""
+    <div class='info-box'>
+    <strong>功能说明</strong>: 本系统 (Deep-SCL-Cat) 与主流机器学习算法在同一测试集上的表现对比。
+    核心关注指标为 <strong>Recall (召回率)</strong>，即正确识别高危学生的能力。
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # 检查对比结果文件是否存在
+    comparison_csv = "outputs/model_comparison.csv"
+    comparison_img = "outputs/model_comparison.png"
+    
+    if not os.path.exists(comparison_csv) or not os.path.exists(comparison_img):
+        st.error("⚠️ 模型对比结果文件未找到")
+        st.info("""
+        请先运行完整分析流程以生成模型对比结果：
+        1. 点击侧边栏的 **🔄 运行完整流程** 按钮
+        2. 或执行命令: `python main.py`
+        3. 等待流程完成后刷新本页面
+        
+        **注意**: 完整流程现在包含多模型对比分析（Step 6）
+        """)
+        return
+    
+    # 加载对比结果
+    try:
+        # 加载CSV数据
+        df_comparison = pd.read_csv(comparison_csv, encoding='utf-8-sig')
+        
+        # 显示对比图表
+        st.markdown("<div class='sub-header'>📊 多模型性能对比图</div>", unsafe_allow_html=True)
+        
+        # 加载对比图片
+        load_image(comparison_img, "多模型性能对比分析")
+        
+        # 显示对比数据
+        st.markdown("<div class='sub-header'>📋 详细性能指标</div>", unsafe_allow_html=True)
+        
+        # 格式化数据框显示
+        df_display = df_comparison.copy()
+        
+        # 格式化数值列
+        numeric_cols = ['Recall', 'Precision', 'F1', 'Accuracy', 'AUC']
+        for col in numeric_cols:
+            if col in df_display.columns:
+                df_display[col] = df_display[col].apply(lambda x: f"{x:.4f}" if pd.notnull(x) else "N/A")
+        
+        # 高亮最佳值
+        def highlight_max(s):
+            try:
+                # 尝试转换为数值
+                numeric_vals = pd.to_numeric(s, errors='coerce')
+                is_max = numeric_vals == numeric_vals.max()
+                return ['background-color: #FFD700; font-weight: bold;' if v else '' for v in is_max]
+            except:
+                return [''] * len(s)
+        
+        # 显示数据框
+        st.dataframe(
+            df_display.style.apply(highlight_max, subset=numeric_cols),
+            hide_index=True,
+            use_container_width=True
+        )
+        
+        # 分析总结
+        st.markdown("<div class='sub-header'>📈 对比分析总结</div>", unsafe_allow_html=True)
+        
+        # 找出最佳模型
+        if not df_comparison.empty:
+            # 按Recall排序
+            df_sorted = df_comparison.sort_values('Recall', ascending=False)
+            best_model = df_sorted.iloc[0]
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown(f"""
+                <div class='metric-card'>
+                    <h3 style='color: #3B82F6; margin-top: 0;'>🏆 最佳模型</h3>
+                    <p style='font-size: 1.8rem; font-weight: bold; color: #1E3A8A;'>{best_model['Model']}</p>
+                    <p style='color: #6B7280; font-size: 0.9rem;'>基于Recall指标评选</p>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            with col2:
+                st.markdown(f"""
+                <div class='metric-card'>
+                    <h3 style='color: #3B82F6; margin-top: 0;'>📊 最佳Recall</h3>
+                    <p style='font-size: 1.8rem; font-weight: bold; color: #1E3A8A;'>{best_model['Recall']:.4f}</p>
+                    <p style='color: #6B7280; font-size: 0.9rem;'>召回率越高，漏报越少</p>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            # 模型优势分析
+            st.markdown("#### 🔍 模型优势分析")
+            
+            # 检查我们的模型表现
+            our_model_row = df_comparison[df_comparison['Model'].str.contains('Deep-SCL-Cat')]
+            if not our_model_row.empty:
+                our_model = our_model_row.iloc[0]
+                our_rank = df_sorted[df_sorted['Model'].str.contains('Deep-SCL-Cat')].index[0] + 1
+                
+                if our_rank == 1:
+                    st.success(f"""
+                    **🎉 Deep-SCL-Cat 表现最佳！**
+                    
+                    - **排名**: 第 {our_rank} 名（共 {len(df_comparison)} 个模型）
+                    - **Recall**: {our_model['Recall']:.4f}（优于所有基线模型）
+                    - **优势**: 在识别高危学生方面表现最优，漏报率最低
+                    """)
+                else:
+                    st.info(f"""
+                    **📊 Deep-SCL-Cat 表现分析**
+                    
+                    - **排名**: 第 {our_rank} 名（共 {len(df_comparison)} 个模型）
+                    - **Recall**: {our_model['Recall']:.4f}
+                    - **与最佳模型差距**: {best_model['Recall'] - our_model['Recall']:.4f}
+                    - **建议**: 考虑调整模型参数或特征工程以提升性能
+                    """)
+            
+            # 各模型特点分析
+            st.markdown("#### 🎯 各模型特点分析")
+            
+            model_analysis = {
+                "Deep-SCL-Cat (Ours)": "专为SCL-90数据优化的CatBoost模型，支持类别特征，自动处理样本不平衡",
+                "Random Forest": "集成学习，抗过拟合能力强，但可能对类别特征处理不如CatBoost",
+                "XGBoost": "梯度提升框架，性能优秀，但对类别特征需要额外编码",
+                "LightGBM": "基于直方图的梯度提升，训练速度快，内存占用低",
+                "Logistic Regression": "线性模型，可解释性强，但可能无法捕捉复杂非线性关系",
+                "SVM": "适合小样本数据，但对大规模数据训练较慢，需要特征标准化"
+            }
+            
+            for model_name, analysis in model_analysis.items():
+                if model_name in df_comparison['Model'].values:
+                    with st.expander(f"📖 {model_name}"):
+                        st.markdown(f"""
+                        <div class='info-box'>
+                        <strong>特点</strong>: {analysis}
+                        </div>
+                        """, unsafe_allow_html=True)
+                        
+                        # 显示该模型的详细指标
+                        model_data = df_comparison[df_comparison['Model'] == model_name].iloc[0]
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.metric("Recall", f"{model_data['Recall']:.4f}")
+                        with col2:
+                            st.metric("F1", f"{model_data['F1']:.4f}")
+                        with col3:
+                            st.metric("Accuracy", f"{model_data['Accuracy']:.4f}")
+        
+        # 下载按钮
+        st.markdown("---")
+        st.markdown("### 💾 导出对比结果")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # 导出CSV
+            csv_data = df_comparison.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
+            st.download_button(
+                label="📥 下载对比数据CSV",
+                data=csv_data,
+                file_name="model_comparison.csv",
+                mime="text/csv",
+                help="包含所有模型的详细性能指标"
+            )
+        
+        with col2:
+            # 导出图片
+            if os.path.exists(comparison_img):
+                with open(comparison_img, "rb") as img_file:
+                    img_data = img_file.read()
+                st.download_button(
+                    label="📥 下载对比图表",
+                    data=img_data,
+                    file_name="model_comparison.png",
+                    mime="image/png",
+                    help="多模型性能对比可视化图表"
+                )
+        
+    except Exception as e:
+        st.error(f"加载对比结果时出错: {e}")
+        st.info("请检查文件格式或重新运行分析流程")
+
+
 def render_batch_screening():
     """渲染批量智能筛查页面"""
     # 页面标题
@@ -945,6 +1136,8 @@ def main():
         render_prediction_simulator()
     elif st.session_state.page == "📂 批量智能筛查":
         render_batch_screening()
+    elif st.session_state.page == "⚔️ 模型竞技场":
+        render_model_arena()
     else:
         st.warning(f"页面 '{st.session_state.page}' 尚未实现")
 

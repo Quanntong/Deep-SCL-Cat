@@ -26,7 +26,7 @@ def train_model():
     构建CatBoost训练流程
     
     返回:
-    tuple: (模型, 测试集特征, 测试集标签)
+    tuple: (模型, 训练集特征, 测试集特征, 训练集标签, 测试集标签)
     """
     print("=" * 50)
     print("CatBoost模型训练流程")
@@ -43,10 +43,10 @@ def train_model():
     except FileNotFoundError:
         print(f"错误: 文件未找到 - {processed_file_path}")
         print("请先运行 feature_cluster.py 生成聚类数据")
-        return None, None, None
+        return None, None, None, None, None
     except Exception as e:
         print(f"读取文件时发生错误: {e}")
-        return None, None, None
+        return None, None, None, None, None
     
     # 2. 数据准备
     print("\n步骤2: 数据准备...")
@@ -152,7 +152,7 @@ def train_model():
         print("模型训练完成!")
     except Exception as e:
         print(f"模型训练失败: {e}")
-        return None, X_test, y_test
+        return None, X_train, X_test, y_train, y_test
     
     # 6. 模型保存
     print("\n步骤6: 模型保存...")
@@ -198,7 +198,7 @@ def train_model():
     print(feature_importance.head(10).to_string(index=False))
     
     # 8. 返回结果
-    return model, X_test, y_test
+    return model, X_train, X_test, y_train, y_test
 
 
 if __name__ == "__main__":
@@ -208,7 +208,7 @@ if __name__ == "__main__":
     print("=" * 50)
     
     # 执行训练函数
-    model, X_test, y_test = train_model()
+    model, X_train, X_test, y_train, y_test = train_model()
     
     if model is not None:
         print("\n" + "=" * 50)

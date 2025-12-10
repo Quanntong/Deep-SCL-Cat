@@ -105,10 +105,11 @@ def main():
         
         # 调用模型训练函数
         print("\n执行CatBoost模型训练...")
-        model, X_test, y_test = model_catboost.train_model()
+        model, X_train, X_test, y_train, y_test = model_catboost.train_model()
         
         if model is not None:
             print(f"模型训练成功，树数量: {model.tree_count_}")
+            print(f"训练集形状: {X_train.shape if X_train is not None else 'N/A'}")
             print(f"测试集形状: {X_test.shape if X_test is not None else 'N/A'}")
         else:
             print("警告: 模型训练返回None，但流程将继续")
@@ -190,6 +191,46 @@ def main():
     
     step_elapsed = time.time() - step_start_time
     print_step_footer(5, "解释性分析", step_elapsed)
+    
+    # Step 6: 多模型对比
+    step_start_time = time.time()
+    print_step_header(6, "多模型对比")
+    
+    try:
+        import src.compare_models as compare_models
+        print("导入 compare_models 模块成功")
+        
+        # 检查是否有训练好的模型和数据
+        if model is not None and X_train is not None and X_test is not None:
+            print("\n执行多模型性能对比分析...")
+            print("对比模型: Random Forest, XGBoost, LightGBM, Logistic Regression, SVM")
+            print("核心指标: Recall (召回率)")
+            
+            # 调用对比函数
+            comparison_results = compare_models.run_comparison(
+                X_train, y_train, X_test, y_test, model
+            )
+            
+            if comparison_results is not None:
+                print(f"对比分析完成，共评估 {len(comparison_results)} 个模型")
+                print(f"结果已保存到 outputs/model_comparison.csv 和 outputs/model_comparison.png")
+            else:
+                print("警告: 对比分析返回None，但流程将继续")
+        else:
+            print("警告: 缺少模型或数据，跳过对比分析步骤")
+            print(f"  模型: {'可用' if model is not None else '不可用'}")
+            print(f"  训练数据: {'可用' if X_train is not None else '不可用'}")
+            print(f"  测试数据: {'可用' if X_test is not None else '不可用'}")
+            
+    except ImportError as e:
+        print(f"错误: 无法导入 compare_models 模块 - {e}")
+        print("跳过对比分析步骤")
+    except Exception as e:
+        print(f"对比分析过程中发生错误: {e}")
+        print("警告: 对比分析失败，但流程将继续")
+    
+    step_elapsed = time.time() - step_start_time
+    print_step_footer(6, "多模型对比", step_elapsed)
     
     # 工作流完成
     total_elapsed = time.time() - total_start_time
