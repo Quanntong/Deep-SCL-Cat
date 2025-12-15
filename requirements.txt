@@ -1,0 +1,12 @@
+pandas
+numpy
+scikit-learn
+catboost
+shap
+matplotlib
+seaborn
+streamlit
+pillow
+openpyxl
+xgboost
+lightgbm
