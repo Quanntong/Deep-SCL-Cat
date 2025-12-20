@@ -185,7 +185,7 @@ Deep-SCL-Cat/
 
 ### 技术栈分工
 
-- **后端算法**：曲善桐、蒋子怡（Python, CatBoost, scikit-learn）
+- **后端算法**：曲善桐（Python, CatBoost, scikit-learn）
 - **数据分析**：蒋子怡、卢勤（Pandas, NumPy, 可视化）
 - **前端界面**：马忠义（Streamlit, HTML/CSS, 交互设计）
 - **文档与测试**：全体成员（Markdown, 单元测试, 用户手册）
