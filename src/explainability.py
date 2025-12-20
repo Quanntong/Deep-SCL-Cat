@@ -1,160 +1,175 @@
-import pandas as pd
-import shap
-from catboost import CatBoostClassifier
-import matplotlib.pyplot as plt
-import numpy as np
 import os
 import sys
+import joblib
+import shap
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from pathlib import Path
+from catboost import CatBoostClassifier
 
-# 配置字体
-plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'Arial Unicode MS']
-plt.rcParams['axes.unicode_minus'] = False
+# ================= Setup & Config =================
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# 路径处理
+BASE_DIR = Path(__file__).resolve().parent.parent
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
 
 try:
     import src.config as config
 except ImportError:
+    import config
+
+# 绘图配置
+plt.switch_backend('Agg') # 后台绘图模式，适合服务器环境
+plt.rcParams.update({
+    'font.sans-serif': ['SimHei', 'Microsoft YaHei', 'Arial Unicode MS'],
+    'axes.unicode_minus': False
+})
+
+# ================= Helper Functions =================
+
+def _load_resources():
+    """加载模型和数据"""
+    model_path = Path(config.BASE_DIR) / 'outputs' / 'catboost_model.cbm'
+    data_path = Path(config.DATA_PROCESSED) / config.PROCESSED_FILE
+    
+    if not model_path.exists():
+        raise FileNotFoundError(f"Model not found at {model_path}")
+    if not data_path.exists():
+        raise FileNotFoundError(f"Data not found at {data_path}")
+
+    print(f"Loading model from: {model_path.name}")
+    model = CatBoostClassifier()
+    model.load_model(str(model_path))
+
+    print(f"Loading data from: {data_path.name}")
+    df = pd.read_csv(data_path)
+    
+    return model, df
+
+def _align_features(X, base_dir):
+    """
+    关键步骤：确保预测数据的特征列与训练时完全一致
+    1. 加载训练时的特征列表
+    2. 补全缺失列（填0）
+    3. 删除多余列
+    4. 强制排序
+    """
+    feature_map_path = Path(base_dir) / 'outputs' / 'model_feature_cols.pkl'
+    
+    if not feature_map_path.exists():
+        print("Warning: Feature map not found. Using raw columns (Risk of mismatch).")
+        return X
+
     try:
-        from . import config
-    except ImportError:
-        import config
+        train_cols = joblib.load(feature_map_path)
+        print(f"Feature Alignment: Aligning to {len(train_cols)} training features...")
+    except Exception as e:
+        print(f"Error loading feature map: {e}")
+        return X
+
+    # 1. 补全缺失
+    missing = set(train_cols) - set(X.columns)
+    if missing:
+        print(f"  -> Filling {len(missing)} missing columns with 0")
+        for c in missing:
+            X[c] = 0
+
+    # 2. 剔除多余
+    extra = set(X.columns) - set(train_cols)
+    if extra:
+        print(f"  -> Dropping {len(extra)} extra columns")
+        X = X.drop(columns=list(extra))
+
+    # 3. 强制排序
+    return X[train_cols]
+
+def _save_plots(shap_values, X_sample, outputs_dir):
+    """生成并保存SHAP分析图表"""
+    outputs_dir = Path(outputs_dir)
+    
+    # 1. Summary Plot (Beeswarm)
+    plt.figure()
+    shap.summary_plot(shap_values, X_sample, show=False)
+    sum_path = outputs_dir / 'shap_summary_dot.png'
+    plt.savefig(sum_path, bbox_inches='tight')
+    plt.close()
+    print(f"Saved: {sum_path.name}")
+
+    # 2. Feature Importance Bar Plot
+    # 处理多分类 vs 二分类的 shape 问题
+    if isinstance(shap_values, list):
+        vals = np.abs(shap_values[0]).mean(0)
+    else:
+        vals = np.abs(shap_values).mean(0)
+
+    imp_df = pd.DataFrame({
+        'Feature': X_sample.columns,
+        'Importance': vals
+    }).sort_values('Importance', ascending=True) # 升序方便画横向条形图
+
+    # 保存 CSV
+    csv_path = outputs_dir / 'shap_feature_importance.csv'
+    imp_df.sort_values('Importance', ascending=False).to_csv(csv_path, index=False)
+    
+    # 画图
+    plt.figure(figsize=(10, max(6, len(imp_df) * 0.3))) # 动态高度
+    bars = plt.barh(imp_df['Feature'], imp_df['Importance'], color=plt.cm.viridis(np.linspace(0.3, 0.9, len(imp_df))))
+    
+    plt.xlabel('mean(|SHAP value|)')
+    plt.title('SHAP Feature Importance')
+    plt.grid(axis='x', linestyle='--', alpha=0.5)
+    
+    # 标数值
+    plt.bar_label(bars, fmt='%.3f', padding=3, fontsize=9)
+    
+    bar_path = outputs_dir / 'shap_importance_bar.png'
+    plt.savefig(bar_path, bbox_inches='tight', dpi=300)
+    plt.close()
+    print(f"Saved: {bar_path.name}")
+
+# ================= Main Execution =================
 
 def explain_model():
-    print("=" * 50)
-    print("SHAP模型可解释性分析")
-    print("=" * 50)
-    plt.switch_backend('Agg')
+    print(f"\n{'='*20} Starting SHAP Analysis {'='*20}")
     
-    # 1. 加载模型
-    model_path = os.path.join(config.BASE_DIR, 'outputs', 'catboost_model.cbm')
     try:
-        model = CatBoostClassifier()
-        model.load_model(model_path)
-    except Exception as e:
-        print(f"模型加载失败: {e}")
-        return
+        # 1. Load Resources
+        model, df = _load_resources()
+        
+        # 2. Preprocessing
+        ignored_cols = ['Risk_Label', '姓名', '学号', 'id', 'avg_score']
+        # 排除非特征列
+        X_raw = df.drop(columns=[c for c in ignored_cols if c in df.columns])
+        
+        if 'Cluster_Label' in X_raw.columns:
+            X_raw['Cluster_Label'] = X_raw['Cluster_Label'].fillna(0).astype(int)
 
-    # 2. 加载数据
-    processed_file_path = os.path.join(config.DATA_PROCESSED, config.PROCESSED_FILE)
-    try:
-        df = pd.read_csv(processed_file_path)
-    except Exception as e:
-        print(f"数据加载失败: {e}")
-        return
-    
-    # 3. 数据准备（关键步骤：剔除无关列！）
-    drop_cols = ['Risk_Label', '姓名', '学号', 'id', 'avg_score']
-    
-    # 确保 Cluster_Label 是数字
-    if 'Cluster_Label' in df.columns:
-        df['Cluster_Label'] = df['Cluster_Label'].fillna(0).astype(int)
-
-    # 生成纯净的特征矩阵 X
-    X = df.drop(columns=[c for c in drop_cols if c in df.columns])
-    print(f"原始特征列 ({len(X.columns)}): {list(X.columns)}")
-    
-    # 检查是否有模型特征列文件，如果有则按照模型训练时的特征顺序重新排列
-    model_feature_path = os.path.join(config.BASE_DIR, 'outputs', 'model_feature_cols.pkl')
-    if os.path.exists(model_feature_path):
-        try:
-            import joblib
-            model_feature_cols = joblib.load(model_feature_path)
-            print(f"加载模型特征列文件: {model_feature_path}")
-            print(f"模型训练时的特征列 ({len(model_feature_cols)}个): {model_feature_cols}")
-            
-            # 检查特征列是否匹配
-            missing_cols = [col for col in model_feature_cols if col not in X.columns]
-            extra_cols = [col for col in X.columns if col not in model_feature_cols]
-            
-            if missing_cols:
-                print(f"警告: 以下特征在数据中缺失: {missing_cols}")
-                # 尝试用0填充缺失列
-                for col in missing_cols:
-                    X[col] = 0
-                    print(f"  已用0填充缺失列: {col}")
-            
-            if extra_cols:
-                print(f"警告: 以下特征在模型中不存在: {extra_cols}")
-                # 删除多余列
-                X = X.drop(columns=extra_cols)
-                print(f"  已删除多余列: {extra_cols}")
-            
-            # 按照模型训练时的特征顺序重新排列
-            X = X[model_feature_cols]
-            print(f"已按照模型训练时的特征顺序重新排列")
-            
-        except Exception as e:
-            print(f"加载模型特征列文件失败: {e}")
-            print("将使用原始特征顺序")
-    else:
-        print(f"警告: 模型特征列文件不存在: {model_feature_path}")
-        print("将使用原始特征顺序，可能导致特征顺序不匹配错误")
-    
-    print(f"最终用于解释的特征列 ({len(X.columns)}): {list(X.columns)}")
-    
-    # 4. SHAP 计算
-    try:
+        # 3. Feature Alignment (关键！)
+        X = _align_features(X_raw, config.BASE_DIR)
+        
+        # 4. Compute SHAP
+        print("Computing SHAP values (this may take a while)...")
         explainer = shap.TreeExplainer(model)
-        # 采样部分数据加速
-        X_sample = X.sample(n=min(500, len(X)), random_state=42)
+        
+        # 采样加速：如果数据量太大，只取 500 条
+        sample_size = min(500, len(X))
+        X_sample = X.sample(n=sample_size, random_state=42)
         shap_values = explainer.shap_values(X_sample)
-    except Exception as e:
-        print(f"SHAP计算失败: {e}")
-        return
+        
+        # 5. Visualization
+        out_dir = Path(config.BASE_DIR) / 'outputs'
+        out_dir.mkdir(parents=True, exist_ok=True)
+        
+        _save_plots(shap_values, X_sample, out_dir)
+        
+        print(f"\n{'='*20} Analysis Complete {'='*20}")
 
-    # 5. 保存图表
-    outputs_dir = os.path.join(config.BASE_DIR, 'outputs')
-    os.makedirs(outputs_dir, exist_ok=True)
-    
-    # 摘要图
-    try:
-        plt.figure()
-        shap.summary_plot(shap_values, X_sample, show=False)
-        plt.savefig(os.path.join(outputs_dir, 'shap_summary_dot.png'), bbox_inches='tight')
-        plt.close()
-        print("SHAP 摘要图已保存")
     except Exception as e:
-        print(f"绘图失败: {e}")
-
-    # 特征重要性 CSV 和条形图
-    try:
-        if isinstance(shap_values, list): # 多分类
-            vals = np.abs(shap_values[0]).mean(0)
-        else: # 二分类
-            vals = np.abs(shap_values).mean(0)
-            
-        importance_df = pd.DataFrame({
-            'Feature': X.columns,
-            '平均绝对SHAP值': vals
-        }).sort_values('平均绝对SHAP值', ascending=False)
-        
-        importance_df.to_csv(os.path.join(outputs_dir, 'shap_feature_importance.csv'), index=False)
-        print("特征重要性 CSV 已保存")
-        print("\nTop 5 重要特征:")
-        print(importance_df.head(5))
-        
-        # 生成特征重要性条形图
-        plt.figure(figsize=(10, 6))
-        colors = plt.cm.viridis(np.linspace(0.3, 0.9, len(importance_df)))
-        bars = plt.barh(range(len(importance_df)), importance_df['平均绝对SHAP值'], color=colors)
-        plt.yticks(range(len(importance_df)), importance_df['Feature'], fontsize=10)
-        plt.xlabel('平均绝对SHAP值', fontsize=12)
-        plt.title('SHAP 特征重要性排序', fontsize=14, pad=20)
-        plt.gca().invert_yaxis()  # 最重要的在顶部
-        
-        # 添加数值标签
-        for i, (bar, val) in enumerate(zip(bars, importance_df['平均绝对SHAP值'])):
-            plt.text(val + 0.01, bar.get_y() + bar.get_height()/2, 
-                    f'{val:.3f}', va='center', fontsize=9)
-        
-        plt.tight_layout()
-        plt.savefig(os.path.join(outputs_dir, 'shap_importance_bar.png'), bbox_inches='tight', dpi=300)
-        plt.close()
-        print("SHAP 特征重要性条形图已保存")
-        
-    except Exception as e:
-        print(f"保存重要性数据失败: {e}")
+        print(f"\n❌ Critical Error: {e}")
+        import traceback
+        traceback.print_exc()
 
 if __name__ == "__main__":
     explain_model()
