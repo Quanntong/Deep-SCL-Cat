@@ -1,135 +1,151 @@
-import pandas as pd
-import numpy as np
-from catboost import CatBoostClassifier, Pool
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import classification_report
-import joblib
 import os
 import sys
+import joblib
+import pandas as pd
+import numpy as np
+from pathlib import Path
+from catboost import CatBoostClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report
 
-# 添加src目录到路径，以便导入config模块
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# ================= Setup =================
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
 
 try:
     import src.config as config
 except ImportError:
-    try:
-        from . import config
-    except ImportError:
-        import config
+    import config
 
+# ================= Helper Functions =================
 
-def train_model():
-    print("=" * 50)
-    print("CatBoost模型训练流程")
-    print("=" * 50)
+def _ensure_risk_labels(df, file_path):
+    """
+    检查并生成 Risk_Label。
+    如果标签不存在，基于心理因子均值生成（>中位数为高危），并回写文件。
+    注意：这是为了保持原代码逻辑的副作用。
+    """
+    if 'Risk_Label' in df.columns:
+        return df
+
+    print("Label Log: 'Risk_Label' not found. Generating based on SCL-90 factors...")
     
-    # 1. 加载数据
-    print("步骤1: 加载数据...")
-    processed_file_path = os.path.join(config.DATA_PROCESSED, config.PROCESSED_FILE)
+    # 1. 锁定因子列
+    factor_cols = [c for c in df.columns if c in config.SCL90_FEATS]
+    if not factor_cols:
+        print("Error: No factor columns found. Assigning random labels (Fallback).")
+        df['Risk_Label'] = np.random.randint(0, 2, size=len(df))
+        return df
+
+    # 2. 计算阈值与标签
+    avg_scores = df[factor_cols].mean(axis=1)
+    threshold = avg_scores.median()
+    df['Risk_Label'] = (avg_scores > threshold).astype(int)
     
+    print(f"Label Log: Generated labels using threshold {threshold:.2f}")
+    print(f"Label Log: Distribution - {df['Risk_Label'].value_counts().to_dict()}")
+
+    # 3. 回写文件 (保留原功能的副作用)
     try:
-        df = pd.read_csv(processed_file_path)
-        print(f"数据加载成功，形状: {df.shape}")
+        df.to_csv(file_path, index=False)
+        print(f"Data Log: Updated dataset saved to {file_path}")
     except Exception as e:
-        print(f"读取文件错误: {e}")
-        return None, None, None, None, None
+        print(f"Warning: Failed to save updated labels to disk: {e}")
 
-    # 2. 数据准备与标签生成
-    print("\n步骤2: 数据准备与标签生成...")
+    return df
+
+def _prepare_features(df):
+    """
+    准备特征矩阵 X 和目标变量 y
+    """
+    # 排除非特征列
+    ignored_cols = {'Risk_Label', '姓名', '学号', 'id', 'avg_score'}
+    target_col = 'Risk_Label'
+
+    # 特征清洗
+    X = df.drop(columns=[c for c in ignored_cols if c in df.columns])
+    y = df[target_col]
+
+    # 处理类别特征
+    cat_features = []
+    if 'Cluster_Label' in X.columns:
+        X['Cluster_Label'] = X['Cluster_Label'].fillna(0).astype(int)
+        cat_features = ['Cluster_Label']
+
+    return X, y, cat_features
+
+def run_training_pipeline():
+    print(f"\n{'='*20} CatBoost Training Pipeline {'='*20}")
     
-    # 确保聚类标签是整数
-    if 'Cluster_Label' in df.columns:
-        df['Cluster_Label'] = df['Cluster_Label'].fillna(0).astype(int)
+    # 1. 路径准备
+    data_path = Path(config.DATA_PROCESSED) / config.PROCESSED_FILE
+    output_dir = Path(config.BASE_DIR) / 'outputs'
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    # =======================================================
-    # 🎯 核心修复：基于中文因子分生成真实的“高危标签”
-    # =======================================================
-    if 'Risk_Label' not in df.columns:
-        print("⚠️ 未检测到 'Risk_Label'，正在基于心理因子分生成...")
+    # 2. 加载数据
+    if not data_path.exists():
+        print(f"Error: Data file not found at {data_path}")
+        return None
         
-        # 1. 锁定所有的心理因子列（利用 config 中的定义）
-        factor_cols = [c for c in df.columns if c in config.SCL90_FEATS]
-        
-        if len(factor_cols) > 0:
-            print(f"   已锁定 {len(factor_cols)} 个心理因子列用于评估风险")
-            
-            # 2. 计算每个学生的平均分
-            df['avg_score'] = df[factor_cols].mean(axis=1)
-            
-            # 3. 设定阈值（取中位数）
-            threshold = df['avg_score'].median()
-            
-            # 4. 生成标签：1=高危，0=正常
-            df['Risk_Label'] = (df['avg_score'] > threshold).astype(int)
-            
-            print(f"   ✅ 已生成 'Risk_Label' (阈值: avg_score > {threshold:.2f})")
-            
-            # 5. 【重要】把生成好标签的数据存回去！
-            # 注意：保存时排除 avg_score 临时列，防止特征泄露
-            df_to_save = df.drop(columns=['avg_score'])
-            df_to_save.to_csv(processed_file_path, index=False)
-            print(f"   💾 已将带有标签的数据回写至: {processed_file_path}")
-            
-        else:
-            print("❌ 严重错误：未找到心理因子列，无法生成标签！将退化为随机模式。")
-            df['Risk_Label'] = np.random.randint(0, 2, size=len(df))
+    df = pd.read_csv(data_path)
+    print(f"Data Loaded: {df.shape}")
 
-    # 显示分布
-    dist = df['Risk_Label'].value_counts()
-    print(f"目标变量分布: 正常(0): {dist.get(0, 0)}, 高危(1): {dist.get(1, 0)}")
+    # 3. 标签完整性检查 (副作用操作)
+    df = _ensure_risk_labels(df, data_path)
 
-    # 3. 准备训练集
-    # 剔除无关列
-    drop_cols = ['Risk_Label', '姓名', '学号', 'id', 'avg_score']
-    X = df.drop(columns=[c for c in drop_cols if c in df.columns])
-    y = df['Risk_Label']
-    
-    print(f"特征列 ({len(X.columns)}): {list(X.columns)}")
+    # 4. 特征工程 
+    X, y, cat_features = _prepare_features(df)
+    print(f"Features: {len(X.columns)} columns")
+    print(f"Categorical Features: {cat_features}")
 
-    # 4. 划分与训练
-    print("\n步骤3: 划分与训练...")
+    # 5. 数据划分
     X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=config.TEST_SIZE, random_state=config.RANDOM_SEED, stratify=y
+        X, y, 
+        test_size=config.TEST_SIZE, 
+        random_state=config.RANDOM_SEED, 
+        stratify=y
     )
-    
-    # 识别类别特征（Cluster_Label）
-    cat_features = ['Cluster_Label'] if 'Cluster_Label' in X.columns else []
-    
+
+    # 6. 模型训练
+    print("\nTraining CatBoost Classifier...")
     model = CatBoostClassifier(
         iterations=500,
         learning_rate=0.05,
         depth=6,
-        auto_class_weights='Balanced',
+        auto_class_weights='Balanced', # 处理类别不平衡
         cat_features=cat_features,
         verbose=100,
         random_seed=config.RANDOM_SEED,
         eval_metric='Recall',
         early_stopping_rounds=50,
-        allow_writing_files=False 
+        allow_writing_files=False
     )
-    
-    print("开始训练...")
-    model.fit(X_train, y_train, eval_set=(X_test, y_test), use_best_model=True, plot=False)
-    
-    # 5. 保存与评估
-    outputs_dir = os.path.join(config.BASE_DIR, 'outputs')
-    os.makedirs(outputs_dir, exist_ok=True)
-    model.save_model(os.path.join(outputs_dir, 'catboost_model.cbm'))
-    
-    # 保存实际使用的特征列（按照训练时的顺序）
-    model_feature_cols = list(X_train.columns)
-    model_feature_path = os.path.join(outputs_dir, 'model_feature_cols.pkl')
-    joblib.dump(model_feature_cols, model_feature_path)
-    print(f"\n模型特征列已保存到: {model_feature_path}")
-    print(f"特征数量: {len(model_feature_cols)}")
-    print(f"特征列: {model_feature_cols}")
-    
+
+    model.fit(
+        X_train, y_train, 
+        eval_set=(X_test, y_test), 
+        use_best_model=True, 
+        plot=False
+    )
+
+    # 7. 评估与保存
+    print("\n--- Evaluation on Test Set ---")
     y_pred = model.predict(X_test)
-    print("\n分类报告:")
     print(classification_report(y_test, y_pred))
-    
+
+    # 保存模型
+    model_path = output_dir / 'catboost_model.cbm'
+    model.save_model(str(model_path))
+    print(f"Model saved: {model_path.name}")
+
+    # 保存特征列名 (关键步骤，用于后续推理/SHAP)
+    feat_path = output_dir / 'model_feature_cols.pkl'
+    joblib.dump(list(X_train.columns), feat_path)
+    print(f"Feature map saved: {feat_path.name}")
+
     return model, X_train, X_test, y_train, y_test
 
 if __name__ == "__main__":
-    train_model()
+    run_training_pipeline()
