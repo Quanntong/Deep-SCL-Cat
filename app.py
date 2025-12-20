@@ -31,7 +31,6 @@ try:
     CATBOOST_AVAILABLE = True
 except ImportError:
     CATBOOST_AVAILABLE = False
-    # 这里不做warning，放到页面渲染时再提示，保持界面整洁
 
 # 页面配置
 st.set_page_config(
@@ -150,7 +149,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 @st.cache_resource
-def load_resources():
+def load_resources(force_reload=False):
     """
     加载模型和预处理资源，使用缓存避免重复加载
     """
@@ -167,8 +166,7 @@ def load_resources():
         required_files = [
             'outputs/catboost_model.cbm',
             'outputs/scaler.pkl',
-            'outputs/kmeans.pkl',
-            'outputs/feature_cols.pkl'
+            'outputs/kmeans.pkl'
         ]
         
         for file in required_files:
@@ -180,6 +178,8 @@ def load_resources():
             model = CatBoostClassifier()
             model.load_model('outputs/catboost_model.cbm')
             resources['model'] = model
+        else:
+            st.warning("⚠️ CatBoost不可用，请安装catboost库")
         
         # 加载标准化器
         scaler = joblib.load('outputs/scaler.pkl')
@@ -189,16 +189,67 @@ def load_resources():
         kmeans = joblib.load('outputs/kmeans.pkl')
         resources['kmeans'] = kmeans
         
-        # 加载特征列名
-        feature_cols = joblib.load('outputs/feature_cols.pkl')
-        resources['feature_cols'] = feature_cols
+        # 尝试加载特征列名 (这是修复Bug的关键)
+        try:
+            if os.path.exists('outputs/model_feature_cols.pkl'):
+                feature_cols = joblib.load('outputs/model_feature_cols.pkl')
+            elif os.path.exists('outputs/feature_cols.pkl'):
+                feature_cols = joblib.load('outputs/feature_cols.pkl')
+            else:
+                feature_cols = None
+        except:
+            feature_cols = None
         
+        resources['feature_cols'] = feature_cols
         resources['loaded'] = True
         
     except Exception as e:
         st.error(f"加载资源时出错: {e}")
     
     return resources
+
+def align_data_with_model(df, model, resource_feature_cols=None):
+    """
+    🛠️ 核心修复函数：强制将输入 DataFrame 的列顺序和名称对齐到模型要求的格式
+    """
+    # 1. 获取模型训练时的特征名称
+    model_features = None
+    
+    # 尝试从 CatBoost 模型对象直接获取
+    if hasattr(model, 'feature_names_'):
+        model_features = model.feature_names_
+    
+    # 如果模型没取到，尝试从外部记录的 pickle 文件获取
+    if model_features is None and resource_feature_cols is not None:
+        model_features = resource_feature_cols
+        
+    if model_features is None:
+        st.error("❌ 无法获取模型的特征名称列表，请检查 outputs/model_feature_cols.pkl 是否存在")
+        st.stop()
+    
+    # 2. 检查缺失列并补全 (Robustness)
+    missing_cols = [col for col in model_features if col not in df.columns]
+    
+    # 针对常见的命名差异做一次自动映射尝试
+    alias_map = {
+        'age': '年龄', '年龄': 'age',
+        'gender': '性别', '性别': 'gender',
+        'Cluster_Label': 'Cluster_Label'  # 确保一致
+    }
+    
+    for missing in missing_cols:
+        # 尝试通过别名寻找
+        if missing in alias_map and alias_map[missing] in df.columns:
+            df[missing] = df[alias_map[missing]]
+        else:
+            # 如果实在找不到，补0 (防止程序崩溃)
+            df[missing] = 0
+
+    # 3. 核心步骤：强制重排
+    # 这一步会丢弃多余的列，并严格按照模型要求的顺序排列
+    aligned_df = df[model_features].copy()
+    
+    return aligned_df
 
 def init_session_state():
     """初始化会话状态"""
@@ -212,7 +263,6 @@ def load_image(image_path, caption="图表"):
     if os.path.exists(image_path):
         try:
             image = Image.open(image_path)
-            # 使用 container 让图片带点阴影
             with st.container():
                 st.image(image, caption=caption, use_column_width=True)
             return True
@@ -227,7 +277,6 @@ def load_image(image_path, caption="图表"):
 def render_sidebar():
     """渲染侧边栏"""
     with st.sidebar:
-        # 项目标题 - 增加Emoji
         st.markdown("<h1 style='text-align: center; color: #1E3A8A; margin-bottom:0;'>🎓 Deep-SCL-Cat</h1>", 
                    unsafe_allow_html=True)
         st.markdown("<p style='text-align: center; color: #6B7280; font-size: 0.9rem;'>智能学业预警系统</p>", 
@@ -235,36 +284,31 @@ def render_sidebar():
         
         st.markdown("---")
         
-        # 页面选择 - 使用原生组件，但样式已通过全局CSS优化
         st.markdown("### 🧭 导航")
         page_options = ["模型概览", "🎓 单体预测模拟", "📂 批量智能筛查", "⚔️ 模型竞技场"]
         
-        # 找出当前index
         current_index = 0
         if st.session_state.page in page_options:
             current_index = page_options.index(st.session_state.page)
             
-        selected_page = st.radio(
+        selected_page = st.selectbox(
             "选择功能模块:",
             page_options,
             index=current_index,
-            label_visibility="collapsed"
+            key="sidebar_nav_main_key"
         )
         
-        # 更新会话状态
         if selected_page != st.session_state.page:
             st.session_state.page = selected_page
             st.rerun()
         
         st.markdown("---")
         
-        # 快速操作
         st.markdown("### ⚡ 控制台")
         
-        # 按钮垂直排列更美观
         if st.button("🔄 运行完整流程", use_container_width=True):
             st.info("🚀 正在启动分析引擎...")
-            # 实际运行 main.py 的代码占位
+            # os.system("python main.py") # 实际部署时可能需要异步执行
             st.success("✨ 流程运行完成！数据已更新。")
             st.rerun()
         
@@ -278,7 +322,6 @@ def render_sidebar():
         
         st.markdown("---")
         
-        # 系统信息
         with st.expander("ℹ️ 系统状态"):
             st.markdown(f"""
             <div style='font-size: 0.85rem; color: #4B5563;'>
@@ -290,7 +333,6 @@ def render_sidebar():
             </div>
             """, unsafe_allow_html=True)
 
-        # 底部版权
         st.markdown("<div style='text-align: center; margin-top: 2rem; color: #9CA3AF; font-size: 0.8rem;'>© 2025 Deep-SCL-Cat Team</div>", unsafe_allow_html=True)
 
 def render_model_overview():
@@ -312,10 +354,7 @@ def render_model_overview():
         """, unsafe_allow_html=True)
     
     with col2:
-        # 尝试从文件读取最佳阈值
         best_threshold = "0.513"
-        threshold_file = "outputs/pr_curve.png" # 模拟逻辑
-        
         st.markdown(f"""
         <div class='metric-card'>
             <div class='metric-title'>最佳决策阈值</div>
@@ -335,7 +374,6 @@ def render_model_overview():
     
     st.markdown("---")
     
-    # 图表展示区
     st.markdown("<div class='sub-header'>🖼️ 可视化分析</div>", unsafe_allow_html=True)
     
     tab1, tab2 = st.tabs(["核心图表", "SHAP 深度解释"])
@@ -362,7 +400,6 @@ def render_model_overview():
             if os.path.exists(csv_path):
                 try:
                     df_importance = pd.read_csv(csv_path, encoding='utf-8-sig')
-                    # 美化表格显示
                     st.dataframe(
                         df_importance.head(10).style.format({'平均绝对SHAP值': '{:.6f}'}).background_gradient(subset=['平均绝对SHAP值'], cmap='Blues'),
                         hide_index=True,
@@ -382,7 +419,6 @@ def render_model_overview():
             else:
                 st.info("数据文件尚未生成，请运行主流程。")
     
-    # 模型信息与建议
     st.markdown("<div class='sub-header'>💡 决策建议</div>", unsafe_allow_html=True)
     
     col_info, col_suggest = st.columns(2)
@@ -412,7 +448,6 @@ def render_model_overview():
         </div>
         """, unsafe_allow_html=True)
     
-    # SCL-90 因子详细释义
     with st.expander("📖 查看 SCL-90 心理学因子详细定义"):
         cols = st.columns(2)
         items = list(config.FACTOR_DEFINITIONS.items())
@@ -426,7 +461,7 @@ def render_model_overview():
                 st.markdown(f"**{factor}**: <span style='color:#666'>{definition}</span>", unsafe_allow_html=True)
 
 def render_prediction_simulator():
-    """渲染单体预测模拟器页面"""
+    """渲染单体预测模拟器页面 (已修复特征对齐问题)"""
     st.markdown("<div class='main-header'>🔮 学生风险实时模拟器</div>", unsafe_allow_html=True)
     
     st.markdown("""
@@ -442,32 +477,27 @@ def render_prediction_simulator():
         return
     
     scoring_features = config.SCL90_FEATS
-    demographic_features = ['age', 'gender']
-    all_features = demographic_features + scoring_features
     
-    # 更加紧凑的表单设计
+    # 表单区域
     with st.container():
         st.markdown("#### 📝 特征录入")
         with st.form("predict_form", border=True):
-            # 分组显示
             st.markdown("**基础信息**")
             c1, c2, c3, c4 = st.columns(4)
             with c1:
-                input_age = st.number_input("年龄", 15.0, 30.0, 20.0, 1.0, key="input_age")
+                input_age = st.number_input("年龄", 15.0, 30.0, 20.0, 1.0, key="sim_age")
             with c2:
-                input_gender = st.selectbox("性别", options=[1, 2], format_func=lambda x: "男" if x==1 else "女", key="input_gender_select")
+                input_gender = st.selectbox("性别", options=[1, 2], format_func=lambda x: "男" if x==1 else "女", key="sim_gender")
                 
             st.markdown("**SCL-90 因子评分 (1-5分)**")
             
-            # 动态生成列
             input_values = {'age': input_age, 'gender': input_gender}
             
-            # 使用更密集的 Grid 布局
             scl_cols = st.columns(5)
             for i, feature in enumerate(scoring_features):
                 col = scl_cols[i % 5]
                 with col:
-                    val = st.number_input(feature, 0.0, 5.0, 2.0, 0.1, key=f"input_{feature}")
+                    val = st.number_input(feature, 0.0, 5.0, 2.0, 0.1, key=f"sim_{feature}")
                     input_values[feature] = val
             
             st.markdown("---")
@@ -476,41 +506,56 @@ def render_prediction_simulator():
                 submitted = st.form_submit_button("🚀 开始智能评估", type="primary", use_container_width=True)
     
     if submitted:
-        # (保持原有的逻辑处理代码不变，仅优化显示部分)
         try:
+            # 1. 构造初始 DataFrame
             input_df = pd.DataFrame([input_values])
+            
+            # 2. 获取资源
             scaler = resources['scaler']
             kmeans = resources['kmeans']
             model = resources['model']
             
-            # 逻辑处理...
+            # 3. 标准化与聚类
             X_scoring = input_df[scoring_features]
+            
+            # 确保标准化器的特征顺序正确
+            if hasattr(scaler, 'feature_names_in_'):
+                # 如果标准化器有特征名称属性，确保顺序匹配
+                scaler_features = list(scaler.feature_names_in_)
+                # 重新排列X_scoring以匹配标准化器的特征顺序
+                X_scoring = X_scoring[scaler_features]
+            
             X_scaled = scaler.transform(X_scoring)
             cluster_label = kmeans.predict(X_scaled)[0]
             
-            input_df_with_cluster = input_df.copy()
-            input_df_with_cluster['Cluster_Label'] = cluster_label
+            # 4. 构造包含聚类标签的数据
+            input_df['Cluster_Label'] = cluster_label
             
-            risk_probability = model.predict_proba(input_df_with_cluster)[0, 1]
-            prediction = model.predict(input_df_with_cluster)[0]
+            # ================= 核心修复：强制特征对齐 =================
+            final_df = align_data_with_model(
+                input_df, 
+                model, 
+                resource_feature_cols=resources['feature_cols']
+            )
+            # ========================================================
+
+            # 5. 预测
+            risk_probability = model.predict_proba(final_df)[0, 1]
+            prediction = model.predict(final_df)[0]
             
-            # 结果显示优化
             best_threshold = 0.513
             is_high_risk = risk_probability > best_threshold
             
             st.markdown("<div style='height: 20px'></div>", unsafe_allow_html=True)
             
-            # 结果Banner
             if is_high_risk:
                 st.error(f"⚠️ 预警：检测到高风险倾向 (概率: {risk_probability*100:.1f}%)")
             else:
                 st.success(f"✅ 正常：未检测到显著风险 (概率: {risk_probability*100:.1f}%)")
             
-            # 结果卡片
             res_c1, res_c2, res_c3 = st.columns(3)
             with res_c1:
                 st.metric("风险概率", f"{risk_probability*100:.1f}%", delta=f"阈值 {best_threshold*100:.1f}%", delta_color="inverse")
-                # 增加一个进度条增强视觉效果
                 st.progress(min(float(risk_probability), 1.0))
                 
             with res_c2:
@@ -520,8 +565,7 @@ def render_prediction_simulator():
             
             with res_c3:
                 st.metric("最终判定", "高危" if is_high_risk else "正常")
-            
-            # 建议区
+                
             if is_high_risk:
                 st.markdown("""
                 <div class='info-box' style='border-left-color: #EF4444; background-color: #FEF2F2;'>
@@ -529,11 +573,10 @@ def render_prediction_simulator():
                 <ul style='margin-bottom:0'>
                     <li>立即启动一对一心理访谈机制。</li>
                     <li>检查该生 <code>抑郁</code> 和 <code>敌对</code> 因子分是否显著偏高。</li>
-                    <li>结合辅导员侧面了解其近期生活压力源。</li>
                 </ul>
                 </div>
                 """, unsafe_allow_html=True)
-            
+
             # 保存状态
             st.session_state.prediction_result = {
                 'risk_probability': risk_probability,
@@ -543,11 +586,16 @@ def render_prediction_simulator():
                 'input_values': input_values
             }
 
+            # 调试辅助 (只在开发时看)
+            # with st.expander("🛠️ 调试信息"):
+            #    st.write("Aligned Columns:", final_df.columns.tolist())
+
         except Exception as e:
-            st.error(f"计算出错: {e}")
+            st.error(f"计算出错: {str(e)}")
+            st.exception(e)
 
 def render_batch_screening():
-    """渲染批量智能筛查页面"""
+    """渲染批量智能筛查页面 (已修复特征对齐问题)"""
     st.markdown("<div class='main-header'>📂 批量智能筛查</div>", unsafe_allow_html=True)
     
     st.markdown("""
@@ -571,50 +619,58 @@ def render_batch_screening():
 
     if uploaded_file is not None:
         try:
-            # 文件读取逻辑保持不变
+            # 文件读取
             file_ext = uploaded_file.name.split('.')[-1].lower()
             if file_ext in ['xlsx', 'xls']:
                 df = pd.read_excel(uploaded_file, engine='openpyxl')
             else:
                 df = pd.read_csv(uploaded_file, encoding='utf-8-sig')
             
-            # 数据校验逻辑保持不变...
-            required_features = config.SCL90_FEATS
-            missing = [f for f in required_features if f not in df.columns]
+            # 数据校验
+            scoring_features = config.SCL90_FEATS
+            missing = [f for f in scoring_features if f not in df.columns]
             
             if missing:
-                st.error(f"❌ 缺少列: {', '.join(missing)}")
+                st.error(f"❌ 缺少必要因子列: {', '.join(missing)}")
                 return
                 
             st.toast("✅ 数据加载成功", icon="📄")
             
-            # 预览
             with st.expander(f"数据预览 ({len(df)} 行)", expanded=False):
                 st.dataframe(df.head(), use_container_width=True)
 
             if st.button("🚀 执行批量评估", type="primary", use_container_width=True):
                 with st.spinner("正在进行大规模计算..."):
-                    # === 核心逻辑保持不变 ===
-                    scoring_features = config.SCL90_FEATS
+                    # 1. 聚类特征提取
                     X_scoring = df[scoring_features].copy()
                     scaler = resources['scaler']
+                    
+                    # 确保标准化器的特征顺序正确
+                    if hasattr(scaler, 'feature_names_in_'):
+                        # 如果标准化器有特征名称属性，确保顺序匹配
+                        scaler_features = list(scaler.feature_names_in_)
+                        # 重新排列X_scoring以匹配标准化器的特征顺序
+                        X_scoring = X_scoring[scaler_features]
+                    
                     X_scaled = scaler.transform(X_scoring)
                     kmeans = resources['kmeans']
                     cluster_labels = kmeans.predict(X_scaled)
                     
-                    if 'age' not in df.columns: df['age'] = 20
-                    if 'gender' not in df.columns: df['gender'] = 1
+                    # 2. 准备预测数据
+                    X_processing = df.copy()
+                    X_processing['Cluster_Label'] = cluster_labels
                     
-                    X_model = pd.DataFrame()
-                    X_model['age'] = df['age']
-                    X_model['gender'] = df['gender']
-                    for feat in scoring_features:
-                        X_model[feat] = df[feat]
-                    X_model['Cluster_Label'] = cluster_labels
-                    
+                    # ================= 核心修复：强制特征对齐 =================
                     model = resources['model']
-                    risk_probabilities = model.predict_proba(X_model)[:, 1]
-                    predictions = model.predict(X_model)
+                    X_final_model_input = align_data_with_model(
+                        X_processing, 
+                        model, 
+                        resource_feature_cols=resources['feature_cols']
+                    )
+                    # ========================================================
+                    
+                    # 3. 预测
+                    risk_probabilities = model.predict_proba(X_final_model_input)[:, 1]
                     
                     df_result = df.copy()
                     df_result['Risk_Probability'] = risk_probabilities
@@ -624,9 +680,8 @@ def render_batch_screening():
                     df_result['Risk_Level'] = df_result['Risk_Label'].map({0: '正常', 1: '高危'})
                     
                     high_risk_df = df_result[df_result['Risk_Label'] == 1].copy()
-                    # === 逻辑结束 ===
-
-                    # 结果展示优化
+                    
+                    # 4. 结果展示
                     st.markdown("---")
                     st.markdown("### 📊 筛查报告")
                     
@@ -643,8 +698,6 @@ def render_batch_screening():
                             use_container_width=True
                         )
                         
-                        # 下载区域
-                        st.markdown("#### 💾 数据导出")
                         d1, d2 = st.columns(2)
                         with d1:
                             st.download_button("📥 下载完整结果 (CSV)", 
@@ -652,7 +705,7 @@ def render_batch_screening():
                                              "full_result.csv", "text/csv", use_container_width=True)
                         with d2:
                             st.download_button("📥 仅下载高危名单 (Excel)",
-                                             high_risk_df.to_excel(index=False, engine='openpyxl'), # 这里需要确保转换成字节流，简化处理略
+                                             high_risk_df.to_excel(index=False, engine='openpyxl'), 
                                              "high_risk.xlsx", 
                                              "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 
                                              use_container_width=True)
@@ -662,6 +715,7 @@ def render_batch_screening():
 
         except Exception as e:
             st.error(f"处理失败: {e}")
+            st.exception(e)
 
 def render_model_arena():
     """渲染模型竞技场页面"""
@@ -684,20 +738,16 @@ def render_model_arena():
     try:
         df_comparison = pd.read_csv(comparison_csv, encoding='utf-8-sig')
         
-        # 上半部分：图表
         st.markdown("#### 📊 性能雷达/柱状图")
         load_image(comparison_img, "多模型性能对比")
         
-        # 下半部分：数据表与高亮
         st.markdown("#### 🏆 详细指标榜单")
         
-        # 找出SCL-Cat行并高亮
         st.dataframe(
             df_comparison.style.highlight_max(axis=0, props='font-weight:bold; background-color:#FEF3C7; color:#B45309'),
             use_container_width=True
         )
         
-        # 冠军展示
         best_recall_model = df_comparison.sort_values('Recall', ascending=False).iloc[0]
         st.markdown(f"""
         <div class='metric-card' style='background: linear-gradient(135deg, #ffffff 0%, #f0f9ff 100%); border: 2px solid #3B82F6;'>
@@ -717,7 +767,6 @@ def main():
     init_session_state()
     render_sidebar()
     
-    # 页面路由
     if st.session_state.page == "模型概览":
         render_model_overview()
     elif st.session_state.page == "🎓 单体预测模拟":

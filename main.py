@@ -254,13 +254,7 @@ def main():
     else:
         print("outputs目录不存在")
     
-    print("\n下一步建议:")
-    print("-" * 40)
-    print("1. 查看 outputs/ 目录中的可视化图表和CSV文件")
-    print("2. 分析 shap_feature_importance.csv 了解关键风险因子")
-    print("3. 使用最佳阈值进行实际预测")
-    print("4. 根据业务需求调整模型参数和阈值")
-    print("=" * 60)
+    
 
 if __name__ == "__main__":
     # 主程序入口
