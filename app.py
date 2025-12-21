@@ -401,7 +401,7 @@ def render_model_overview():
                 try:
                     df_importance = pd.read_csv(csv_path, encoding='utf-8-sig')
                     st.dataframe(
-                        df_importance.head(10).style.format({'平均绝对SHAP值': '{:.6f}'}).background_gradient(subset=['平均绝对SHAP值'], cmap='Blues'),
+                        df_importance.head(10).style.format({'Importance': '{:.6f}'}).background_gradient(subset=['Importance'], cmap='Blues'),
                         hide_index=True,
                         use_container_width=True
                     )
