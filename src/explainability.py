@@ -22,9 +22,36 @@ except ImportError:
 
 # 绘图配置
 plt.switch_backend('Agg') # 后台绘图模式，适合服务器环境
+
+# 确保中文字体正确显示 - 使用与 config.py 一致的中文字体配置
+import matplotlib
+import matplotlib.font_manager as fm
+
+# 添加中文字体路径到字体管理器
+# 获取系统中可用的中文字体
+chinese_fonts = []
+for font in fm.fontManager.ttflist:
+    font_name = font.name.lower()
+    if 'yahei' in font_name or 'simhei' in font_name or 'simsun' in font_name or 'microsoft jhenghei' in font_name:
+        chinese_fonts.append(font.name)
+
+# 设置字体配置
+if chinese_fonts:
+    matplotlib.rcParams['font.sans-serif'] = chinese_fonts + ['DejaVu Sans', 'Arial Unicode MS']
+else:
+    matplotlib.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'SimSun', 'DejaVu Sans', 'Arial Unicode MS']
+
+matplotlib.rcParams['axes.unicode_minus'] = False
+
+# 设置默认字体大小
 plt.rcParams.update({
-    'font.sans-serif': ['SimHei', 'Microsoft YaHei', 'Arial Unicode MS'],
-    'axes.unicode_minus': False
+    'font.size': 12,
+    'axes.titlesize': 14,
+    'axes.labelsize': 12,
+    'xtick.labelsize': 10,
+    'ytick.labelsize': 10,
+    'legend.fontsize': 10,
+    'figure.titlesize': 16
 })
 
 # ================= Helper Functions =================
@@ -48,42 +75,57 @@ def _load_resources():
     
     return model, df
 
-def _align_features(X, base_dir):
+def _align_features(X, model):
     """
     关键步骤：确保预测数据的特征列与训练时完全一致
-    1. 加载训练时的特征列表
-    2. 补全缺失列（填0）
-    3. 删除多余列
-    4. 强制排序
+    使用模型的实际特征名称进行对齐
     """
-    feature_map_path = Path(base_dir) / 'outputs' / 'model_feature_cols.pkl'
+    if not hasattr(model, 'feature_names_') or model.feature_names_ is None:
+        print("Warning: Model has no feature names. Using raw columns (Risk of mismatch).")
+        return X
     
-    if not feature_map_path.exists():
-        print("Warning: Feature map not found. Using raw columns (Risk of mismatch).")
-        return X
+    train_cols = model.feature_names_
+    print(f"Feature Alignment: Aligning to {len(train_cols)} model features...")
+    print(f"Model features: {train_cols}")
+    print(f"Data features: {list(X.columns)}")
 
-    try:
-        train_cols = joblib.load(feature_map_path)
-        print(f"Feature Alignment: Aligning to {len(train_cols)} training features...")
-    except Exception as e:
-        print(f"Error loading feature map: {e}")
-        return X
-
-    # 1. 补全缺失
-    missing = set(train_cols) - set(X.columns)
+    # 创建特征名称映射（处理缩写差异）
+    feature_mapping = {}
+    for model_feat in train_cols:
+        # 尝试找到匹配的数据列
+        matched = False
+        for data_feat in X.columns:
+            if model_feat in data_feat or data_feat in model_feat:
+                feature_mapping[model_feat] = data_feat
+                matched = True
+                break
+        
+        # 如果没有找到匹配，使用模型特征名
+        if not matched:
+            feature_mapping[model_feat] = model_feat
+    
+    # 1. 重命名列以匹配模型特征名
+    X_aligned = X.copy()
+    for model_feat, data_feat in feature_mapping.items():
+        if model_feat != data_feat and data_feat in X_aligned.columns:
+            X_aligned = X_aligned.rename(columns={data_feat: model_feat})
+            print(f"  -> Renamed '{data_feat}' to '{model_feat}'")
+    
+    # 2. 补全缺失列（填0）
+    missing = set(train_cols) - set(X_aligned.columns)
     if missing:
-        print(f"  -> Filling {len(missing)} missing columns with 0")
+        print(f"  -> Filling {len(missing)} missing columns with 0: {list(missing)}")
         for c in missing:
-            X[c] = 0
+            X_aligned[c] = 0
 
-    # 2. 剔除多余
-    extra = set(X.columns) - set(train_cols)
+    # 3. 剔除多余列
+    extra = set(X_aligned.columns) - set(train_cols)
     if extra:
-        print(f"  -> Dropping {len(extra)} extra columns")
-        X = X.drop(columns=list(extra))
+        print(f"  -> Dropping {len(extra)} extra columns: {list(extra)}")
+        X_aligned = X_aligned.drop(columns=list(extra))
 
-    # 3. 强制排序
-    return X[train_cols]
+    # 4. 强制排序
+    return X_aligned[train_cols]
 
 def _save_plots(shap_values, X_sample, outputs_dir):
     """生成并保存SHAP分析图表"""
@@ -147,7 +189,7 @@ def explain_model():
             X_raw['Cluster_Label'] = X_raw['Cluster_Label'].fillna(0).astype(int)
 
         # 3. Feature Alignment (关键！)
-        X = _align_features(X_raw, config.BASE_DIR)
+        X = _align_features(X_raw, model)
         
         # 4. Compute SHAP
         print("Computing SHAP values (this may take a while)...")

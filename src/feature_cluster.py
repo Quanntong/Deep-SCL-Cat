@@ -1,145 +1,72 @@
+# src/feature_cluster.py
 import os
 import sys
 import joblib
-import numpy as np
 import pandas as pd
-from pathlib import Path
+import numpy as np
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 
-# ================= Setup =================
-
-# 路径适配
-BASE_DIR = Path(__file__).resolve().parent.parent
-if str(BASE_DIR) not in sys.path:
-    sys.path.insert(0, str(BASE_DIR))
-
 try:
     import src.config as config
-    from src import data_loader
 except ImportError:
     import config
-    import data_loader
 
-# ================= Core Logic =================
-
-def train_cluster_model(df, n_clusters=3):
+def process_clustering():
     """
-    执行特征提取、标准化与 K-Means 聚类
+    执行聚类特征工程：
+    1. 读取清洗后的数据
+    2. 对SCL-90特征进行标准化
+    3. 执行K-Means聚类 (k=3)
+    4. 保存模型和带有聚类标签的新数据
     """
-    # 1. 特征选择 (优先 SCL90，回退到数值列)
-    feature_cols = [c for c in df.columns if c in config.SCL90_FEATS]
-    if not feature_cols:
-        print("Warning: SCL-90 features not found. Falling back to numeric columns.")
-        # 排除非特征列
-        exclude = {'Label', 'Target', 'Risk', 'Risk_Label', 'id'}
-        feature_cols = [c for c in df.select_dtypes(include=[np.number]).columns 
-                        if c not in exclude]
+    print(">>> [Cluster Expert] 启动聚类分析...")
+    
+    # 1. 读取数据
+    data_path = os.path.join(config.DATA_PROCESSED, config.PROCESSED_FILE)
+    if not os.path.exists(data_path):
+        print(f"❌ 错误: 找不到处理后的数据文件 {data_path}，请先运行 data_loader.py")
+        return None
 
-    print(f"Features selected ({len(feature_cols)}): {feature_cols}")
-
-    # 2. 标准化
+    df = pd.read_csv(data_path, encoding='utf-8-sig')
+    
+    # 2. 提取特征并标准化
+    # 只使用SCL-90心理因子进行聚类，不包含人口学特征，保证画像纯粹性
+    feature_cols = config.SCL90_FEATURES
     X = df[feature_cols]
+    
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
-
-    # 3. 聚类 
-    print(f"Training K-Means with {n_clusters} clusters...")
-    kmeans = KMeans(n_clusters=n_clusters, random_state=config.RANDOM_SEED, n_init=10)
-    labels = kmeans.fit_predict(X_scaled)
-
-    # 4. 合并结果
-    df_result = df.copy()
-    df_result['Cluster_Label'] = labels
     
-    return {
-        'df': df_result,
-        'model': kmeans,
-        'scaler': scaler,
-        'features': feature_cols,
-        'X_scaled': X_scaled
-    }
-
-def save_artifacts(results_dict):
-    """
-    持久化保存：数据 csv + 模型 pkl
-    """
-    output_dir = Path(config.BASE_DIR) / 'outputs'
-    data_dir = Path(config.DATA_PROCESSED)
+    # 3. K-Means 聚类
+    # 这里保持原论文/设计的 k=3 (通常对应: 健康、亚健康、高风险)
+    kmeans = KMeans(n_clusters=3, random_state=config.RANDOM_SEED, n_init=10)
+    cluster_labels = kmeans.fit_predict(X_scaled)
     
-    output_dir.mkdir(parents=True, exist_ok=True)
-    data_dir.mkdir(parents=True, exist_ok=True)
-
-    # 保存数据
-    csv_path = data_dir / config.PROCESSED_FILE
-    results_dict['df'].to_csv(csv_path, index=False)
-    print(f"Data saved: {csv_path.name}")
-
-    # 保存模型组件
-    artifacts = {
-        'scaler.pkl': results_dict['scaler'],
-        'kmeans.pkl': results_dict['model'],
-        'feature_cols.pkl': results_dict['features']
-    }
-
-    for filename, obj in artifacts.items():
-        path = output_dir / filename
-        joblib.dump(obj, path)
-        print(f"Artifact saved: {filename}")
-
-def analyze_profiles(df, feature_cols):
-    """
-    利用 Pandas GroupBy 快速生成画像分析
-    """
-    print(f"\n{'='*20} Cluster Profile Analysis {'='*20}")
+    # 4. 结果整合
+    df['Cluster_Label'] = cluster_labels
     
-    # 1. 样本分布
-    counts = df['Cluster_Label'].value_counts().sort_index()
-    total = len(df)
-    print("\n--- Sample Distribution ---")
-    for lbl, count in counts.items():
-        print(f"Cluster {lbl}: {count} ({count/total:.1%})")
-
-    # 2. 聚类中心 (Feature Means)
-    # 使用 groupby 一次性计算所有均值，替代手动循环
-    print("\n--- Feature Profiles (Mean Values) ---")
-    means = df.groupby('Cluster_Label')[feature_cols].mean()
+    # 简单的画像分析打印
+    print("\n--- 聚类结果分析 ---")
+    print(f"各簇样本分布:\n{df['Cluster_Label'].value_counts().sort_index()}")
     
-    for lbl in means.index:
-        row = means.loc[lbl].sort_values(ascending=False)
-        top_3 = row.head(3).index.tolist()
-        bottom_3 = row.tail(3).index.tolist()
-        
-        print(f"Cluster {lbl}:")
-        print(f"  Top Features:    {', '.join([f'{f}({row[f]:.2f})' for f in top_3])}")
-        print(f"  Lowest Features: {', '.join([f'{f}({row[f]:.2f})' for f in bottom_3])}")
+    # 计算每个簇在关键因子(如抑郁)上的均值，帮助确认哪个簇是'高危簇'
+    # 注意：K-Means的标签0,1,2是随机的，需要人工或后续逻辑确认含义
+    print("\n各簇'抑郁'因子均值:")
+    print(df.groupby('Cluster_Label')['抑郁'].mean())
+    
+    # 5. 保存所有资产
+    # 保存带有标签的数据，供后续分类和回归模型使用
+    save_path = os.path.join(config.DATA_PROCESSED, 'scl90_with_clusters.csv')
+    df.to_csv(save_path, index=False, encoding='utf-8-sig')
+    print(f"✅ 已保存带聚类标签的数据至: {save_path}")
+    
+    # 保存模型对象，用于后续对新样本(单体预测)进行推理
+    joblib.dump(kmeans, os.path.join(config.OUTPUT_DIR, 'kmeans.pkl'))
+    joblib.dump(scaler, os.path.join(config.OUTPUT_DIR, 'scaler.pkl'))
+    print("✅ 已保存 KMeans 模型和 StandardScaler")
 
-    # 3. 业务解释 (保持原有逻辑)
-    print("\n--- Interpretation Hint ---")
-    if any('score' in f for f in feature_cols) or any(f in config.SCL90_FEATS for f in feature_cols):
-        print("Cluster 0/1/2 interpretation depends on severity (check Top Features).")
-        print("Typically: High scores -> Symptomatic; Low scores -> Healthy.")
-    else:
-        print("Check feature patterns above to assign labels.")
-
-# ================= Main Execution =================
+    return df
 
 if __name__ == "__main__":
-    print("Starting Clustering Pipeline...")
-    
-    # 1. Load
-    raw_df = data_loader.load_and_clean_data()
-    
-    if raw_df is not None:
-        # 2. Train
-        results = train_cluster_model(raw_df, n_clusters=3)
-        
-        # 3. Save
-        save_artifacts(results)
-        
-        # 4. Analyze
-        analyze_profiles(results['df'], results['features'])
-        
-        print("\nPipeline completed successfully.")
-    else:
-        print("Pipeline aborted due to data loading failure.")
+    process_clustering()

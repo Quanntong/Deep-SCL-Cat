@@ -1,172 +1,143 @@
 import os
-import sys
-import joblib
 import numpy as np
-import pandas as pd
-import matplotlib
-matplotlib.use('Agg') # 服务器后端，防止无GUI环境报错
 import matplotlib.pyplot as plt
+from sklearn.metrics import precision_recall_curve, auc
 from pathlib import Path
-from catboost import CatBoostClassifier
-from sklearn.metrics import precision_recall_curve
 
-# ================= Setup =================
+# 设置绘图风格，处理中文显示问题
+# 使用与 config.py 一致的中文字体配置
+import matplotlib
+import matplotlib.font_manager as fm
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-if str(BASE_DIR) not in sys.path:
-    sys.path.insert(0, str(BASE_DIR))
+# 先设置样式
+plt.style.use('seaborn-v0_8-whitegrid')
 
-try:
-    import src.config as config
-except ImportError:
-    import config
+# 添加中文字体路径到字体管理器
+# 获取系统中可用的中文字体
+chinese_fonts = []
+for font in fm.fontManager.ttflist:
+    font_name = font.name.lower()
+    if 'yahei' in font_name or 'simhei' in font_name or 'simsun' in font_name or 'microsoft jhenghei' in font_name:
+        chinese_fonts.append(font.name)
 
-# 全局绘图风格
-plt.style.use('seaborn-v0_8-darkgrid')
+# 设置字体配置（在样式设置之后，确保覆盖样式中的字体设置）
+if chinese_fonts:
+    matplotlib.rcParams['font.sans-serif'] = chinese_fonts + ['DejaVu Sans', 'Arial Unicode MS']
+else:
+    matplotlib.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'SimSun', 'DejaVu Sans', 'Arial Unicode MS']
 
-# ================= Helper Functions =================
+plt.rcParams['axes.unicode_minus'] = False
 
-def _load_artifacts():
-    """加载数据和模型"""
-    data_path = Path(config.DATA_PROCESSED) / config.PROCESSED_FILE
-    model_path = Path(config.BASE_DIR) / 'outputs' / 'catboost_model.cbm'
-    feat_path = Path(config.BASE_DIR) / 'outputs' / 'model_feature_cols.pkl'
-
-    if not data_path.exists() or not model_path.exists():
-        raise FileNotFoundError("Data or Model file missing.")
-
-    print(f"Loading data from: {data_path.name}")
-    df = pd.read_csv(data_path)
+def find_optimal_threshold(model, X, y_true, target_recall=0.80, save_dir=None):
+    """
+    寻找最佳分类阈值策略：
+    在满足 召回率 >= target_recall 的前提下，寻找 精确率(Precision) 最高的点。
     
-    print(f"Loading model from: {model_path.name}")
-    model = CatBoostClassifier()
-    model.load_model(str(model_path))
-
-    # 加载特征列表（如果存在）
-    train_features = None
-    if feat_path.exists():
-        train_features = joblib.load(feat_path)
-        print(f"Loaded feature map: {len(train_features)} features")
-
-    return df, model, train_features
-
-def _prepare_inference_data(df, train_features=None):
-    """
-    准备推理数据：
-    1. 剔除无关列
-    2. 处理类别特征
-    3. (关键) 强制对齐特征顺序与训练时一致
-    """
-    if 'Risk_Label' not in df.columns:
-        print("Warning: 'Risk_Label' missing, cannot calculate metrics.")
-        return None, None
-
-    # 1. 基础清洗
-    ignored = ['Risk_Label', '姓名', '学号', 'id', 'avg_score']
-    X = df.drop(columns=[c for c in ignored if c in df.columns])
-    y = df['Risk_Label']
-
-    if 'Cluster_Label' in X.columns:
-        X['Cluster_Label'] = X['Cluster_Label'].fillna(0).astype(int)
-
-    # 2. 特征对齐 (Feature Alignment)
-    if train_features:
-        # 补全缺失列
-        missing = set(train_features) - set(X.columns)
-        if missing:
-            print(f"Align: Filling {len(missing)} missing columns with 0")
-            for c in missing:
-                X[c] = 0
+    参数:
+        model: 已训练好的模型 (需支持 predict_proba)
+        X: 特征数据 (DataFrame 或 numpy array)
+        y_true: 真实标签 (0/1)
+        target_recall: 目标召回率 (默认 0.80)
+        save_dir: 图片保存路径 (可选)
         
-        # 剔除多余列
-        extra = set(X.columns) - set(train_features)
-        if extra:
-            print(f"Align: Dropping {len(extra)} extra columns")
-            X = X.drop(columns=list(extra))
-            
-        # 强制重排
-        X = X[train_features]
+    返回:
+        best_threshold (float): 最佳阈值
+    """
+    print(f"\n{'='*20} 启动阈值寻优策略 {'='*20}")
+    
+    # 1. 获取预测概率
+    try:
+        # 获取属于类别 1 (高危) 的概率
+        y_scores = model.predict_proba(X)[:, 1]
+    except AttributeError:
+        print("❌ 错误: 模型没有 predict_proba 方法")
+        return 0.5
+
+    # 2. 计算 P-R 曲线数据 
+    precisions, recalls, thresholds = precision_recall_curve(y_true, y_scores)
+    pr_auc = auc(recalls, precisions)
+
+    # 3. 核心算法：寻找满足 recall >= target 的最优截断点
+    # 注意：thresholds 的长度比 recalls/precisions 少 1
+    # 我们只看 recalls[:-1]，这样长度就跟 thresholds 对齐了
+    valid_indices = np.where(recalls[:-1] >= target_recall)[0]
+    
+    if len(valid_indices) > 0:
+        # 在满足召回率要求的所有点中，找 Precision 最高的那个点的索引
+        # valid_indices 是原数组中的下标
+        best_idx_in_valid = np.argmax(precisions[valid_indices])
+        best_idx = valid_indices[best_idx_in_valid]
+        
+        status_msg = "✅ 已找到满足目标召回率的最佳阈值"
     else:
-        print("Warning: No feature map provided. Using raw columns (risk of mismatch).")
+        # 如果模型太烂，死活达不到目标召回率（比如要求0.99但模型做不到），则退而求其次
+        # 选择 recall 最大的那个点（通常意味着阈值极低）
+        print(f"⚠️ 警告: 无法满足 Recall >= {target_recall}，已自动调整为最大可能召回率。")
+        best_idx = np.argmax(recalls[:-1])
+        status_msg = "⚠️ 妥协阈值 (最大召回优先)"
 
-    return X, y
+    # 获取结果
+    best_thresh = thresholds[best_idx]
+    best_r = recalls[best_idx]
+    best_p = precisions[best_idx]
+    
+    print(f"{status_msg}")
+    print(f"   - 目标召回率: {target_recall:.2%}")
+    print(f"   - 推荐阈值: {best_thresh:.6f}")
+    print(f"   - 预期表现: Recall={best_r:.4f}, Precision={best_p:.4f}")
 
-def _plot_pr_curve(recall, precision, best_idx, best_thresh, output_dir):
-    """绘制 P-R 曲线"""
+    # 4. 可视化绘制
+    if save_dir:
+        _plot_pr_tradeoff(recalls, precisions, thresholds, best_idx, pr_auc, target_recall, save_dir)
+        
+    return float(best_thresh)
+
+def _plot_pr_tradeoff(recalls, precisions, thresholds, best_idx, pr_auc, target_recall, save_dir):
+    """内部辅助函数：绘制专业的 P-R 权衡曲线"""
     plt.figure(figsize=(10, 6))
-    plt.plot(recall, precision, label='P-R Curve', linewidth=2, color='#2878B5')
+    
+    # 绘制主曲线
+    plt.plot(recalls, precisions, label=f'P-R Curve (AUC = {pr_auc:.3f})', 
+             color='#1f77b4', linewidth=2, alpha=0.8)
+    
+    # 填充曲线下面积
+    plt.fill_between(recalls, precisions, color='#1f77b4', alpha=0.1)
     
     # 标记最佳点
-    best_r = recall[best_idx]
-    best_p = precision[best_idx]
-    plt.scatter(best_r, best_p, c='#C82423', s=100, zorder=5, 
-                label=f'Optimal (Th={best_thresh:.3f})')
+    best_r = recalls[best_idx]
+    best_p = precisions[best_idx]
+    best_t = thresholds[best_idx]
     
-    # 辅助线
-    plt.axvline(best_r, color='gray', linestyle='--', alpha=0.5)
-    plt.axhline(best_p, color='gray', linestyle='--', alpha=0.5)
-
-    plt.title('Precision-Recall Curve with Optimal Threshold')
-    plt.xlabel('Recall (Sensitivity)')
-    plt.ylabel('Precision')
-    plt.legend(loc='lower left')
+    plt.scatter(best_r, best_p, s=150, c='#d62728', edgecolors='white', zorder=10, 
+                label=f'最佳阈值点\n(T={best_t:.3f}, R={best_r:.2f}, P={best_p:.2f})')
     
-    save_path = output_dir / 'pr_curve.png'
+    # 绘制目标召回率参考线
+    plt.axvline(x=target_recall, color='green', linestyle='--', alpha=0.6, 
+                label=f'目标召回率 ({target_recall})')
+    
+    # 装饰图表
+    plt.title('精确率-召回率权衡曲线 (Precision-Recall Trade-off)', fontsize=14, pad=15)
+    plt.xlabel('召回率 (Recall) - 查全能力', fontsize=12)
+    plt.ylabel('精确率 (Precision) - 查准能力', fontsize=12)
+    plt.legend(loc='lower left', frameon=True, shadow=True)
+    plt.grid(True, linestyle=':', alpha=0.6)
+    plt.xlim([0.0, 1.05])
+    plt.ylim([0.0, 1.05])
+    
+    # 保存
+    os.makedirs(save_dir, exist_ok=True)
+    save_path = os.path.join(save_dir, 'optimal_threshold_curve.png')
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
     plt.close()
-    print(f"Chart saved to: {save_path}")
-
-# ================= Main Logic =================
-
-def find_optimal_threshold(target_recall=0.95):
-    print(f"\n{'='*20} Threshold Optimization Strategy {'='*20}")
-    
-    try:
-        # 1. 加载资源
-        df, model, train_features = _load_artifacts()
-        
-        # 2. 准备数据
-        X, y = _prepare_inference_data(df, train_features)
-        if X is None: return
-
-        # 3. 模型推理
-        print("Running inference...")
-        y_proba = model.predict_proba(X)[:, 1]
-
-        # 4. 计算 P-R 曲线 [Image of Precision-Recall curve trade-off]
-        precision, recall, thresholds = precision_recall_curve(y, y_proba)
-
-        # 5. 寻找最佳阈值 (NumPy Vectorized Approach)
-        # 目标：在 Recall >= 0.95 的前提下，Precision 最大的点
-        valid_mask = recall[:-1] >= target_recall # recall 长度比 threshold 多 1
-        
-        if valid_mask.any():
-            # 将不满足条件的 precision 设为 -1，然后找最大值的索引
-            # 注意：thresholds 长度比 p/r 短 1，但通常 p/r 的最后一个值是 1.0/0.0，索引对应需要注意
-            filtered_precision = np.where(valid_mask, precision[:-1], -1)
-            best_idx = np.argmax(filtered_precision)
-        else:
-            print(f"Warning: No threshold meets Recall >= {target_recall}. Maximizing Recall instead.")
-            best_idx = np.argmax(recall[:-1])
-
-        best_threshold = thresholds[best_idx]
-        best_r = recall[best_idx]
-        best_p = precision[best_idx]
-
-        print(f"\n✅ Optimal Threshold Found: {best_threshold:.4f}")
-        print(f"   Metrics at this point: Recall={best_r:.4f}, Precision={best_p:.4f}")
-
-        # 6. 保存结果
-        output_dir = Path(config.BASE_DIR) / 'outputs'
-        _plot_pr_curve(recall, precision, best_idx, best_threshold, output_dir)
-        
-        return best_threshold
-
-    except Exception as e:
-        print(f"❌ Optimization failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return None
+    print(f"📊 优化图表已保存至: {save_path}")
 
 if __name__ == "__main__":
-    find_optimal_threshold()
+    # 单元测试代码 (模拟数据运行)
+    from sklearn.datasets import make_classification
+    from sklearn.linear_model import LogisticRegression
+    
+    print(">>> 正在运行单元测试...")
+    X, y = make_classification(n_samples=1000, n_classes=2, weights=[0.8, 0.2], random_state=42)
+    model = LogisticRegression().fit(X, y)
+    
+    find_optimal_threshold(model, X, y, target_recall=0.85, save_dir='.')
